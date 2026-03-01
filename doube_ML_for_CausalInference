@@ -1,0 +1,464 @@
+**ANALITICS in ECONOMICS - prof. RICCABONI** </br>
+MDS2SL 23-24 </br>
+08/2024 </br>
+
+# Double Machine Learning for causal inference: model of unionism and wage rate
+
+I dati utilizzanti nel presente elaborato provengono dal seguente articolo:
+
+*Whose wages do unions raise? : A dynamic model of unionism and wage rate determination for young men -
+Francis Vella and Marno Verbeek -
+Year of publication: 1998 -
+Published in: Journal of applied econometrics. - Chichester : Wiley-Blackwell, ISSN 0883-7252, ZDB-ID 633941-4. - Vol. 13.1998, 2, p. 163-183*
+
+In questo articolo si conclude che l'iscrizione al sindacato ha un effetto sul salario con un aumento del 21% anche se viene evidenziato un probabile heterogeneous treatment effect non osservato che induce effetti diversificati del trattamento/non trattamento sui soggetti. Nell'articolo viene usato un probit dynamic model.  
+
+L'obiettivo del presente lavoro è applicare tecniche di DoubleML per stimare l'effetto dell'iscrizione al sindato (d = union) sul salario (y = lwage).
+Il dataset è composto da 4360 rows × 45 columns. Le variabili esplicative sono in maggioranza binarie. Di seguito i metadati delle variabili:
+
+*  nr: person identifier </br>
+*  year: 1980 to 1987</br>
+*  agric: =1 if in agriculture</br>
+*  black: =1 if black</br>
+*  married: =1 if married</br>
+*  exper: labor mkt experience</br>
+*  fin:</br>
+*  educ: years of schooling </br>
+*  hisp: =1 if Hispanic</br>
+*  poorhlth: =1 if in poor health</br>
+*  hours: annual hours worked</br>
+*  union: =1 if in union </br>
+*  lwage: log(wage) hourly </br>
+*  d81-87: =1 if year == 1981</br>
+*  expersq: exper^2 </br>
+*  nrthcen: =1 if north central</br>
+*  nrtheast: =1 if north east</br>
+*  rur:</br>
+*  south: =1 if south </br>
+OCCUPATIONAL DUMMIES
+*  occ1-9: Professional/Managers/Farm Laborers and Foreman/..</br>
+INDUSTRIAL DUMMIES
+*  bus: =1 if  Business & Repair Service</br>
+*  construc: =1 if in construction</br>
+*  ent: =1 if  Entertainmen</br>
+*  manuf: =1 if in manufacturing</br>
+*  pro:</br>
+*  pub:</br>
+*  min:</br>
+*  tra: </br>
+*  trad: </br>
+*  per: = 1 Personal Servic </br>
+</br>
+</br>
+Le fasi del presente  lavoro sono:
+
+1.   analisi preliminare dei dati
+2.   impostazione del metodo di DoubleMl usando la libreria DoubleML
+3.   applicazione con differenti modelli di ML
+4.   analisi dei risultati
+
+**Imports**
+"""
+
+!pip install doubleml~=0.7.0
+
+import numpy as np
+import pandas as pd
+import math
+import itertools
+import seaborn as sns
+import doubleml as dml
+import matplotlib.pyplot as plt
+
+
+from doubleml import DoubleMLData
+from doubleml._utils_resampling import DoubleMLResampling
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier, GradientBoostingRegressor, GradientBoostingClassifier
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import confusion_matrix
+from sklearn.base import clone
+
+"""Load data"""
+
+from google.colab import drive
+drive.mount('/content/drive')
+
+# i dati in formato csv sono stati ottenuti da una libreria in R per la quale riporto il codice di estrazione nella consegna
+# file: extract_data_Union_csv.R
+file_name = "/content/drive/MyDrive/consegna_AnayticsEconomics_MD2SL_Letterio_2024/wagepan.csv"
+oj_data = pd.read_csv(file_name)
+
+"""# **1) Analisi preliminare dei dati**"""
+
+oj_data.head()
+
+# SCATTERPLOT
+variable = "lwage"
+
+# Calculate the number of rows and columns for subplots
+other_variables = [col for col in oj_data.columns if col != variable]
+num_variables = len(other_variables)
+num_rows = math.ceil(math.sqrt(num_variables))
+num_cols = math.ceil(num_variables / num_rows)
+
+# Create the subplots
+fig, axes = plt.subplots(num_rows, num_cols, figsize=(15, 12))  # Adjust figsize as needed
+
+# Flatten the axes array for easier iteration
+axes = axes.flatten()
+
+# Plot 'lwage' against all other variables
+for i, other_var in enumerate(other_variables):
+    axes[i].scatter(oj_data[variable], oj_data[other_var])
+    axes[i].set_xlabel(variable)
+    axes[i].set_ylabel(other_var)
+    axes[i].set_title(f"{variable} vs {other_var}")
+
+# Hide any unused subplots
+for i in range(num_variables, num_rows * num_cols):
+    axes[i].axis('off')
+
+plt.tight_layout()
+plt.show()
+
+"""La maggior parte sono varibili binarie. Per le poche variabili non binarie non si notano trend marcati. Un debole correlazione positiva tipo esponenziale si nota tra salario ed anni esperienza  (expersq) come era presumibile aspettarsi."""
+
+# PLOT frequency histogram of lwage for each variabile grouped by dummy
+
+# Define a function to find dummy variables
+def find_dummy_variables(df):
+    dummy_vars = [col for col in df.columns if df[col].nunique() == 2 and set(df[col].unique()) <= {0, 1}]
+    return dummy_vars
+
+# Define a function to plot frequency distributions for a dummy variable
+def plot_frequency_distributions(ax, df, dummy_var, target_var):
+    # Plot histogram on the provided axis
+    sns.histplot(df, x=target_var, hue=dummy_var, element="step", stat="density", common_norm=False, bins=30, palette="Set1", alpha=0.5, ax=ax)
+
+    # Calculate and plot mean for each group
+    means = df.groupby(dummy_var)[target_var].mean()
+    for value in means.index:
+        ax.axvline(means[value], color='blue' if value == 0 else 'green', linestyle='dashed', linewidth=2,
+                   label=f'Mean {dummy_var}={value}: {means[value]:.2f}')
+
+    # Calculate count for each group
+    group_counts = df.groupby(dummy_var).size()
+
+    # Update legend with counts
+    for value in group_counts.index:
+        count_val = group_counts.at[value]
+        ax.axvline(df[df[dummy_var] == value][target_var].mean(), color='blue' if value == 0 else 'green', linestyle='dashed', linewidth=2,
+                   label=f'{dummy_var}={value} (Count: {count_val})')
+
+    ax.set_title(f'Frequency Distribution of {target_var} by {dummy_var}')
+    ax.set_xlabel(target_var)
+    ax.set_ylabel('Density')
+    ax.legend(title=dummy_var)
+
+# Choose the variable to plot against others
+variable_fix = "lwage"
+
+# Find dummy variables in the DataFrame
+dummy_vars = find_dummy_variables(oj_data)
+
+# Number of subplots
+num_dummies = len(dummy_vars)
+
+# Determine the number of rows needed
+num_cols = 5
+num_rows = math.ceil(num_dummies / num_cols)
+
+# Create a figure with multiple subplots
+fig, axes = plt.subplots(nrows=num_rows, ncols=num_cols, figsize=(20, 6 * num_rows))
+
+# Flatten axes array to iterate easily
+axes = axes.flatten()
+
+# Automate plotting for each dummy variable
+for i, dummy_var in enumerate(dummy_vars):
+    plot_frequency_distributions(axes[i], oj_data, dummy_var, variable_fix)
+
+# Hide any unused subplots
+for j in range(i + 1, len(axes)):
+    fig.delaxes(axes[j])
+
+plt.tight_layout()  # Adjust layout to prevent overlap
+plt.show()
+
+"""**COMMENTI**
+- Il grafico lwage distribution by Union riporta la numerosità dei trattamenti e si può notare un certo sbilanciamento verso union=0 (la numerosità di union=0 è 3 volte union=1)  
+- Comunque le medie di lwage per la dummy union evidenziano uno shift minimo.
+- Tale differenza marcata di lwage tra le medie si nota anche per alcuni settori produttivi tipo "manu-factoring", in caso di "married" ma ciò potrebbe essere dovuto a sgravi fiscali per famiglie.
+- Ci sono alcuni casi dove il lwage è inferiore come in agricoltura, o nelle zone rurali.
+"""
+
+# PLOT confusion Matrix between UNION and other dummy variables
+
+# Function to find dummy variables
+def find_dummy_variables(df):
+    dummy_vars = [col for col in df.columns if df[col].nunique() == 2 and set(df[col].unique()) <= {0, 1}]
+    return dummy_vars
+
+# Function to plot confusion matrices in subplots with 5 plots per row
+def plot_confusion_matrices_in_subplots(df, target_var, dummy_vars):
+    num_dummies = len(dummy_vars)
+    num_cols = 5
+    num_rows = math.ceil(num_dummies / num_cols)
+
+    fig, axes = plt.subplots(nrows=num_rows, ncols=num_cols, figsize=(10, 4 * num_rows))
+    axes = axes.flatten()  # Flatten the axes array for easy iteration
+
+    for i, dummy_var in enumerate(dummy_vars):
+        if dummy_var != target_var:
+            # Compute confusion matrix
+            cm = confusion_matrix(df[target_var], df[dummy_var])
+            cm_df = pd.DataFrame(cm, index=[f'{target_var}=0', f'{target_var}=1'],
+                                 columns=[f'{dummy_var}=0', f'{dummy_var}=1'])
+
+            # Plot the confusion matrix on the corresponding subplot
+            sns.heatmap(cm_df, annot=True, fmt='d', cmap='Blues', cbar=False,
+                        xticklabels=[f'{dummy_var}=0', f'{dummy_var}=1'],
+                        yticklabels=[f'{target_var}=0', f'{target_var}=1'],
+                        ax=axes[i])
+
+            axes[i].set_title(f'Confusion Matrix: {target_var} vs {dummy_var}', fontsize=6)  # Reduced title size
+            axes[i].set_xlabel(f'{dummy_var}')
+            axes[i].set_ylabel(f'{target_var}')
+
+    # Hide any unused subplots
+    for j in range(i + 1, len(axes)):
+        fig.delaxes(axes[j])
+
+    plt.tight_layout()
+    plt.show()
+
+# Assume oj_data is your DataFrame
+dummy_vars = find_dummy_variables(oj_data)
+
+# Plot confusion matrices for 'union' against each other dummy variable in subplots
+plot_confusion_matrices_in_subplots(oj_data, 'union', dummy_vars)
+
+"""**COMMENTI**
+- per tutte le variabili c'è un evidente sbilanciamento per union=0
+- Esempio solo per chi è occupato in PUB (public administration) c'è un bilanciamento tra chi è iscritto al sindacato e chi no
+
+# **2) Metodo di DoubleMl usando la libreria DoubleML**
+</br>
+#########################################################################
+testo ripreso da https://docs.doubleml.org/stable/intro/intro.html#intro
+</br>
+</br>
+Bach, P., Chernozhukov, V., Kurz, M. S., Spindler, M. and Klaassen, S. (2024), DoubleML - An Object-Oriented Implementation of Double Machine Learning in R, Journal of Statistical Software, 108(3): 1-56, doi:10.18637/jss.v108.i03, arXiv:2103.09603.
+</br>
+#########################################################################
+
+Il Modello Generale Partially linear regression (PLR) può essere specificato come segue:
+
+\begin{align}\begin{aligned}Y = D \theta_0 + g_0(X) + \zeta, & &\mathbb{E}(\zeta | D,X) = 0,\\D = m_0(X) + V, & &\mathbb{E}(V | X) = 0,\end{aligned}\end{align}
+
+Eq.1
+
+   - Y: La variabile di risultato di interesse.
+   - D: La variabile di politica o trattamento.
+   - θ₀: Il parametro che rappresenta l'effetto della variabile di politica D sull'outcome Y.
+   - g₀(X): Una funzione non lineare delle covariate confondenti X. Questa funzione cattura la relazione non lineare tra le covariate e l'outcome.
+   - ζ: Il termine di errore, che si assume abbia un valore atteso condizionale nulla data D e X.
+
+Eq.2
+
+   - m₀(X): Una funzione delle covariate X che descrive come la variabile di politica D è determinata da X. Questa funzione può essere non lineare.
+   - V: Un termine di errore associato alla variabile di politica D.
+
+Per eliminare il bias associato alla velocità di convegenza a 0 di $\hat{\theta}$ - $\theta$ minore di rad(n), può essere applicato il metodo del partialling-out che si basa sul principio di ortogonalità di Newman. Prima viene stiamato V dell'eq. 2 e poi viene applicato l'OLS tra Y-g_0(X) e V.
+Applicando il Frisch-Waugh-Lovell Theorem la procedura può essere così riscritta:
+
+\begin{align}\begin{aligned}Y = l_0(X) + \zeta, & &\mathbb{E}(\zeta | D,X) = 0,\\D = m_0(X) + V, & &\mathbb{E}(V | X) = 0,\end{aligned}\end{align}
+
+
+\begin{align}\begin{aligned}W = Y - l_0(X) , & &\mathbb\\V = D- m_0(X), & &\mathbb\\W = \theta_0 V & &\mathbb, & \end{aligned}\end{align}
+</br>
+
+Le funzioni m₀, g₀, l₀ possono essere modelli non linerari di ML.
+Nel caso in esame il D è binario (union=1/0). Con D binario può essere utilizzato il PLR con la funzione DoubleMLPLR definendo il modello ML per ml_l e per ml_m (con ml_m classificatore in questo caso). Con D binario il double ML può essere applicato anche attraverso l' Interactive regression model (IRM) (V. Chernozhukov et al., 2018, par 5.1) già implementato nella libraria DoubleML (https://arxiv.org/pdf/2103.09603) nella funzione DoubleMLIRM. Quest'ultimo può essere definito come segue:
+
+\begin{align}\begin{aligned}Y = g_0(D, X) + U, & &\mathbb{E}(U | X, D) = 0,\\D = m_0(X) + V, & &\mathbb{E}(V | X) = 0,\end{aligned}\end{align}
+
+Dove la variabile di trattamento D è binaria (Union). Y è lwage, X sono le altre covariate. Viene considerata la stima degli effetti medi del trattamento quando gli effetti del trattamento sono completamente eterogenei. Questo può rappresentare il caso in esame essendo uno studio osservazionale. La parte θD non è più additiva rispetto alle g(X). Questo permetterà di avere due g(x): g_0(x) per i non trattati e g_1(x) per i trattati. La funzione m rappresenta un modello di classificazione essendo binomiale, mentre g può essere un modello di ML regressione. I parametri di interesse in questo modello sono l'effetto medio del trattamento (ATE),
+
+\begin{align}\begin{aligned}\theta_0 = \mathbb{E}[g_0(1, X) - g_0(0,X)],\end{aligned}\end{align}
+
+
+</br>
+</br>
+
+# **Applicazione preliminare del DoubleML**
+
+PREPROCESS
+"""
+
+# SCALING ALL VARIABLS excluding lwage
+#scaler = MinMaxScaler()
+#oj_data_transformer = scaler.fit_transform(oj_data)
+#oj_data_transformer
+#scaled_features_df = pd.DataFrame(oj_data_transformer, index=oj_data.index, columns=oj_data.columns)
+#scaled_features_df = scaled_features_df.iloc[:,1:]
+scaled_features_df = oj_data
+
+"""Non viene applicato lo scaling delle variabili esplicative perchè avrei avuto dei risultati non confrontabili con quelli dell'articolo in cui non hanno applicato metodi di standardizzazione."""
+
+#ORDERING FATURES for librayr DoubleML
+scaled_features_df1 = scaled_features_df.pop('lwage') # remove column b and store it in df1
+scaled_features_df2 = scaled_features_df.pop('union') # remove column x and store it in df2
+scaled_features_df['y']= scaled_features_df1 # add b series as a 'new' column.
+scaled_features_df['d']= scaled_features_df2 # add b series as a 'new' column.
+
+#LABELLING
+new_columns = []
+for i, col in enumerate(scaled_features_df.columns):
+    if col == "y":
+        new_columns.append(col)
+    elif col == "d":
+        new_columns.append(col)
+    else:
+        new_columns.append(f"X{i}")
+
+scaled_features_df.columns = new_columns
+
+# Read dataset into DoubleMLData
+obj_dml_data_from_df = DoubleMLData(scaled_features_df, 'y', 'd')
+
+"""**TEST PRELIMINAR MODELS for l and m for Double ML = PLRM con partialling-out**"""
+
+# Define Model for l0 and mo: RandomForestRegression per l e RandomForestClassifier per m
+ml_l = RandomForestRegressor(n_estimators=100, max_features=45, max_depth=5, min_samples_leaf=2)
+ml_m = RandomForestClassifier(n_estimators=100, max_features=20, max_depth=5, min_samples_leaf=2)# classifier for M due to D binary
+
+"""La libreria dml implementa in automatico il sample splitting per la stima OLS del d che consente di evitare l'overfitting. Un subset dei dati per la stima di g e m ed un altro subset per θ."""
+
+# apply DoubleML PLR method
+dml_irm_obj = dml.DoubleMLPLR(obj_dml_data_from_df, ml_l, ml_m,n_folds=2,
+                             n_rep=10,
+                             score='partialling out') #cross validation and partialling out
+model_dml_plr_obj = dml_irm_obj.fit()
+print(model_dml_plr_obj)
+
+"""**TEST PRELIMINAR MODELS for g and m for Double ML = IRM**"""
+
+# Define Model for g0 and mo: RandomForestRegression per g e RandomForestClassifier per m
+ml_g = RandomForestRegressor(n_estimators=100, max_features=45, max_depth=5, min_samples_leaf=2)
+ml_m = RandomForestClassifier(n_estimators=100, max_features=20, max_depth=5, min_samples_leaf=2) # using classifier due to format of treatment variable D
+
+# apply DoubleML IMR method
+dml_irm_obj = dml.DoubleMLIRM(obj_dml_data_from_df, ml_g, ml_m, score ='ATE', draw_sample_splitting=True)
+model_dml_irm_obj = dml_irm_obj.fit()
+print(model_dml_irm_obj)
+
+"""Il coefficiente di d che quantifica l'effetto dell'Union = 1 sul lwage è di 0.14. Nell'articolo citato l'effetto medio del trattamento è di 0.21. Nel presente procedimento sono stati utilizzati due modelli *m* e *g* di RandomForest che hanno dato un fitting migliore e quindi un *d* minore rispetto al modello lineare utilizzato nell'articolo. Il coefficiente di d (0.14) è molto simile a quello stimato con PLR e partialling-out (0.16) quindi i metodi sono robusti, anche se il modello IRM può essere considerato il modello corretto per il problema analizzato essendo D binaria. Sia applicando PLR e IRM il modello m applicato è di classificazione essendo D binaria.
+
+# **3)Applicazione con differenti modelli di ML**
+
+**BOOTSTRAPPING FROM MODEL SELECTION DATASET**
+
+Faccio campionamento bootstrap di 100 campioni di dimensioni 0.3 dell'intero dataset. Il processamento dura circa 15 minuti. Altimenti ridure il numero di campioni e la numerosità (es. n_rep = 50, frac = 0.2)
+"""
+
+n_rep = 100
+frac = 0.3
+n_obs = int(4360*frac)
+
+datasets = []
+i = 0
+while i < n_rep:
+  selected = scaled_features_df.sample(frac=frac, replace=True)
+  datasets.append(dml.DoubleMLData(selected, 'y', 'd'))
+  i += 1
+
+"""Applicando il metodo IRM imposto altri modelli e combinazioni per m e g: GradientBoostingRegressor, GradientBoostingClassifier, oltre a quelli già testati preliminarmente."""
+
+from sklearn.linear_model import LinearRegression, LogisticRegressionCV
+
+
+reg_learner_1 = RandomForestRegressor(max_depth=5, max_features=45, min_samples_leaf=2)
+reg_learner_2 = GradientBoostingRegressor()
+class_learner_1 = RandomForestClassifier(max_depth=5, max_features=20, min_samples_leaf=2)
+class_learner_2 = GradientBoostingClassifier()
+
+learner_list = [{'ml_g': reg_learner_1, 'ml_m': class_learner_1},
+                {'ml_g': reg_learner_2, 'ml_m': class_learner_1},
+                {'ml_g': reg_learner_1, 'ml_m': class_learner_2},
+                {'ml_g': reg_learner_2, 'ml_m': class_learner_2}]
+
+"""Applicazione del kfold sampling sul bootstrap del dataset per applicazione del metodo le differenti combinazioni di modelli."""
+
+coefs = np.full(shape=(n_rep, len(learner_list)), fill_value=np.nan)
+rmses_ml_m = np.full(shape=(n_rep, len(learner_list)), fill_value=np.nan)
+rmses_ml_g0 = np.full(shape=(n_rep, len(learner_list)), fill_value=np.nan)
+rmses_ml_g1 = np.full(shape=(n_rep, len(learner_list)), fill_value=np.nan)
+
+coverage = np.full(shape=(n_rep, len(learner_list)), fill_value=np.nan)
+
+for i_rep in range(n_rep): # per ogni campione di bootstrap
+    print(f"\rProcessing: {round((i_rep+1)/n_rep*100, 3)} %", end="")
+    dml_data = datasets[i_rep]
+    # define the sample splitting stratified on d variable for cross-validation
+    smpls = DoubleMLResampling(n_folds=5, n_rep=1, n_obs=n_obs,
+                               apply_cross_fitting=True, stratify=dml_data.d).split_samples()
+
+    for i_learners, learners in enumerate(learner_list): # cycle for each couple od Ml models
+        np.random.seed(42)
+        dml_irm = dml.DoubleMLIRM(dml_data,
+                                  ml_g=clone(learners['ml_g']),
+                                  ml_m=clone(learners['ml_m']),
+                                  draw_sample_splitting=False)
+        dml_irm.set_sample_splitting(smpls)
+        dml_irm.fit(n_jobs_cv=5) # cross validation
+
+        coefs[i_rep, i_learners] = dml_irm.coef[0]
+        rmses_ml_m[i_rep, i_learners] = dml_irm.rmses['ml_m']
+        rmses_ml_g0[i_rep, i_learners] = dml_irm.rmses['ml_g0']
+        rmses_ml_g1[i_rep, i_learners] = dml_irm.rmses['ml_g1']
+
+"""## **4)Analisi dei risultati per la selezione del modello**"""
+
+colnames = ['RFreg + RFcla','Boost + RFcla', 'RFreg + Boost', 'Boost + Boost']
+
+df_coefs = pd.DataFrame(coefs, columns=colnames)
+df_ml_m = pd.DataFrame(rmses_ml_m, columns=colnames)
+df_ml_g0 = pd.DataFrame(rmses_ml_g0, columns=colnames)
+df_ml_g1 = pd.DataFrame(rmses_ml_g1, columns=colnames)
+
+fig, axes = plt.subplots(2, 2, figsize=(15, 5))
+fig.suptitle('Learner Comparison')
+
+ggf = sns.kdeplot(data=df_coefs,ax=axes[0][0], fill=True, alpha=0.3)
+ggf.set_xlim(-0.1, 0.4)
+sns.kdeplot(data=df_ml_m, ax=axes[0][1], fill=True, alpha=0.3, legend=False)
+sns.kdeplot(data=df_ml_g0, ax=axes[1][0], fill=True, alpha=0.3, legend=False)
+ggd = sns.kdeplot(data=df_ml_g1, ax=axes[1][1], fill=True, alpha=0.3, legend=False)
+ggd.set_xlim(0.2, 0.7)
+
+axes[0][0].title.set_text('Estimated Parameter')
+axes[0][1].title.set_text('RMSE ml_m')
+axes[1][0].title.set_text('RMSE ml_g0')
+axes[1][1].title.set_text('RMSE ml_g1')
+
+plt.subplots_adjust(left=0.1,
+                    bottom=0.1,
+                    right=0.9,
+                    top=0.9,
+                    wspace=0.4,
+                    hspace=0.4)
+plt.show()
+
+"""**Commento**
+- RMSE di m (su D) per RFcla e Boost(class) si ha raggruppamento a 2 a 2. Le minime differenze a coppie sono dovute a il campionamento di bootstrapping dei campioni. Comunque in generale Boost(class) da un residuo minore essendo un metodo in grado di prevedere meglio i casi più difficili essendo applicato sequenzialmente sui residui quindi con un miglior adattamento ai casi particolari. Questo però induce una varianza maggiore come si nota.
+- stesso vale, anche se in modo meno marcato, sul RMS di g(regression) per RFreg e Boost(reg). Sul trattato g1 con union=1 gli errori sono simili. Sul non trattato (g0, union=0) il Boost(regr) ha un in media errore minore ma una varianza maggiore; anche in questo caso si nota un trade-off tra bias e varianza.
+- Sui parametri stimati dai 2 modelli combinati come si vede dal primo grafico in alto/sx con m = RFclass si ha un minore varianza rispetto al boost. E ciò dimostra come, in modo combinato, la funzione g = RFclass generi un risultato con minor varianza.
+- Per dare più robustezza alla selezione si potrebbe incidere sui seguenti parametri n_rep = 1000 frac = 0.4 ma ciò aumenterebbe i tempi di calcolo.
+"""
+
+df_coefs.describe()
+
+"""
+**Commento**
+- i modelli RFreg + RFcla	e Boost + RFcla danno medie del coefficiente d molto simili. Con modello g Boost di classificazione si ha errore medio più basso e varianza più alta (std). Il modello boost applicandosi sequenzialmente sui residui riduce il bias. L'errore minore si ha per l'ultimo modello boost+boost con RMSE 0.12."""
