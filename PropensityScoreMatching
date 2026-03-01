@@ -1,0 +1,175 @@
+---
+title: "Policy evaluation and impact analysis - MD2SL 2023/2024 Prof. Rungi"
+output: html_document
+date: "2024-12-20"
+---
+</br>
+Tommaso Letterio
+</br>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Propensisty Score Matching for evaluation of effetcs of Unionism and Wage Rate
+
+
+I dati utilizzanti nel presente elaborato provengono dal seguente articolo:
+
+*Whose wages do unions raise? : A dynamic model of unionism and wage rate determination for young men -
+Francis Vella and Marno Verbeek -
+Year of publication: 1998 -
+Published in: Journal of applied econometrics. - Chichester : Wiley-Blackwell, ISSN 0883-7252, ZDB-ID 633941-4. - Vol. 13.1998, 2, p. 163-183*
+
+In questo articolo si conclude che l'iscrizione al sindacato ha un effetto sul salario con un aumento del 20%, anche se viene evidenziato un  heterogeneous treatment effect, che induce effetti molto diversificati sulle  variabili di controllo e sui singoli individui. Nell'articolo viene usato un probit dynamic model.  
+
+L'obiettivo del presente lavoro è applicare il metodo del propensity score matching (PSM) per calcolare l'average treatment effects (ATE)  dell'iscrizione al sindato (d = union) sul salario (y = lwage) utilizzando le altre variabili.
+Il dataset è composto da 4360 rows × 45 columns. Le variabili esplicative sono in maggioranza binarie. Di seguito i metadati delle variabili:
+
+*  nr: person identifier </br>
+*  year: 1980 to 1987</br>
+*  agric: =1 if in agriculture</br>
+*  black: =1 if black</br>
+*  married: =1 if married</br>
+*  exper: labor mkt experience</br>
+*  fin:</br>
+*  educ: years of schooling </br>
+*  hisp: =1 if Hispanic</br>
+*  poorhlth: =1 if in poor health</br>
+*  hours: annual hours worked</br>
+*  union: =1 if in union </br>
+*  lwage: log(wage) hourly </br>
+*  d81-87: =1 if year == 1981</br>
+*  expersq: exper^2 </br>
+*  nrthcen: =1 if north central</br>
+*  nrtheast: =1 if north east</br>
+*  rur:</br>
+*  south: =1 if south </br>
+OCCUPATIONAL DUMMIES
+*  occ1-9: Professional/Managers/Farm Laborers and Foreman/..</br>
+INDUSTRIAL DUMMIES
+*  bus: =1 if  Business & Repair Service</br>
+*  construc: =1 if in construction</br>
+*  ent: =1 if  Entertainmen</br>
+*  manuf: =1 if in manufacturing</br>
+*  pro:</br>
+*  pub:</br>
+*  min:</br>
+*  tra: </br>
+*  trad: </br>
+*  per: = 1 Personal Servic </br>
+</br>
+Le fasi del presente lavoro sono:
+
+1.   analisi preliminare dei dati
+2.   applicazione del PSM
+3.   calcolo del ATE e analisi dei risultati
+
+## 1) analisi preliminare dei dati
+
+Nella presente sezione presentiamo alcune statistiche descrittive del dataset per le variabili continue e  per la variabile “Union” che rappresenta il trattamento. L’analisi preliminare rivela che quest'ultima è fortemente sbilanciata verso il valore 0, rappresentativo degli individui non appartenenti ad alcuna organizzazione sindacale (non trattati). Questa distribuzione asimmetrica può essere sintomatica di un criterio di assegnazione al trattamento non casuale, potenzialmente basato su caratteristiche individuali o di contesto (ad esempio, settore lavorativo, qualifiche professionali, posizione geografica o caratteristiche socio-demografiche) che influenzano la probabilità di aderire o meno ad un sindacato.
+
+Un assegnamento non randomizzato può introdurre bias di selezione, compromettendo la validità interna degli studi causali: gli individui trattati (membri di “Union”) potrebbero infatti differire dai non trattati in maniera sistematica, rendendo non comparabili i due gruppi. Per affrontare tale criticità, si propone l’applicazione del Propensity Score Matching (PSM). Questo metodo, fondato su solide basi teoriche e metodologiche, consente di stimare la probabilità di essere assegnati al trattamento sulla base di un insieme di covariate pre-trattamento. Attraverso il matching, si costruiscono quindi sottocampioni di trattati e non trattati con caratteristiche iniziali confrontabili. In questo modo, il PSM contribuisce a ridurre i bias di selezione, migliorando la robustezza e l’affidabilità delle stime degli effetti causali associati all’adesione sindacale. 
+
+```{r , include=FALSE}
+# -- Setup and Package Installation ------------------------------------------
+required_packages <- c("wooldridge", "plm", "targeted", "MatchIt", "dplyr", "cobalt", "knitr")
+for (pkg in required_packages) {
+  if(!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, dependencies=TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+summary(cars)
+```
+```{r echo = FALSE, results='asis'}
+# -- Load Data ---------------------------------------------------------------
+data("wagepan", package = "wooldridge")
+view = wagepan
+# Inspect the first few rows and summary of the data
+knitr::kable(head(wagepan[c("nr", "year", "hours", "educ", "lwage", "expersq")]), caption = "First 6 rows of wagepan dataset", format = "html")
+knitr::kable(
+  t(round(do.call(cbind, lapply(wagepan[c("nr", "year", "hours", "educ", "lwage", "expersq")], summary)), 1)), 
+  caption = "Statistics of wagepan dataset", 
+  format = "html"
+)
+knitr::kable(
+  table(wagepan$union), 
+  caption = "Counters of union", 
+  format = "html"
+)
+
+
+
+```
+## 2) applicazione del propensity score matching
+
+Il metodo del PSM applicato viene implementato con la libreria *matchit*. La variabile target del modello è "union" e le variabili esplicative (confondenti) sono tutte le altre. Viene applicato un modello logit ed il metodo di matching selezionato è il "nearest neighbor method". In questo modo vengono identificati 1064 individui del Controllo e ne vengono scartati 2232 come si può notare nella parte finale del summary. 
+Nella funzione potrebbero essere scelti altri metodi di matching (*method*) quali ad esempio Radius or Kernel o altri modelli diversi dal logit (gam, lasso/ridge, randomForest). Inoltre potrebbero essere imposte soglie di matching tramite la variabile *caliper* che andrebbero a ridurre anche la numerosità dei trattati; senza l'impostazione di tale soglia il numedo di trattati non viene ridotto. 
+
+
+```{r}
+# -- Propensity Score Matching -----------------------------------------------
+# Nearest neighbor matching with a logistic model for the propensity score
+psm_model <- matchit(
+  union ~ agric + black + bus + construc + ent + exper + fin + hisp + 
+    poorhlth + hours + manuf + married + min + nrthcen + nrtheast + occ1 + occ2 + 
+    occ3 + occ4 + occ5 + occ6 + occ7 + occ8 + occ9 + per + pro + pub + rur + 
+    south + educ + tra + trad + d81 + d82 + d83 + d84 + d85 + d86 + d87 + expersq,
+  data = wagepan,
+  method = "nearest",
+  distance = "logit"
+)
+
+# Summarize the matching result
+print(summary(psm_model))
+```
+Successivamente vengono selezionate solo le unità statistiche che rientrano nel matching.
+
+```{r}
+# Extract matched data
+matched_data <- match.data(psm_model)
+
+# Check how many units are matched
+print(table(matched_data$union))
+```
+E' possibile fare un check della variazione del bilanciamento nei grafici successivi. Come si può notare per alcune variabili sia dummy che continue l'effetto del matching porta ad un miglior bilanciamento.
+
+```{r}
+# -- Balance Checks ----------------------------------------------------------
+# plot for standardized mean differences before/after matching
+love.plot(psm_model, abs = TRUE, var.order = "unadjusted", threshold = 0.1, stars = "std")
+
+# Distribution of propensity scores before and after matching
+plot(psm_model, type = "hist")
+```
+
+
+## 4) calcolo del ATE average treatmente effects e analisi dei risultati
+
+Utilizzando il subset ottenuto dal PSM è possibile calcolare l'ATE. Per questo sono state utilizzate due funzioni diverse. 
+
+```{r}
+# -- Estimate Treatment Effect -----------------------------------------------
+# Fit a simple linear model using matched data
+# The coefficient on 'union' represents the ATE in the matched sample.
+outcome_model <- lm(lwage ~ union, data = matched_data)
+print(summary(outcome_model))
+
+# Estimate ATE using the targeted package
+ate_m <- ate(lwage ~ union, data = matched_data, nuisance=~1, propensity=~1)
+print(summary(ate_m))
+```
+
+
+Nel grafico successivo inoltre è possibile visualizzare un box plot delle distribuzioni.
+
+```{r}
+# -- Visualize Outcome by Treatment Group ------------------------------------
+boxplot(lwage ~ union, data = matched_data,
+        col = c("skyblue", "lightgreen"),
+        names = c("Non-Union", "Union"),
+        main = "Distribution of Log Wages by Treatment Status (Matched Sample)",
+        ylab = "Log Wage")
+```
+
+Il valore dell'ATE calcolato risulta di 0.17 con ambedue le librerie. Se confrontiamo tale valore rispetto al valore di 0.20 come calcolato nell'articolo origiale si potrebbe affermare che applicando il metodo del PSM la relazione causale tra appartenenza ad "union" e salario è inferiore.
